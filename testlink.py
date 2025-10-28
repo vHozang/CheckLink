@@ -2,6 +2,7 @@ import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from time import sleep
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -176,6 +177,16 @@ def check_link_status(
     return result["classification"]
 
 
+def _resolve_per_link_delay() -> float:
+    """Return enforced delay (seconds) between link checks; defaults to 10s."""
+    raw = os.environ.get("CHECKLINK_PER_LINK_DELAY", "10")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 10.0
+    return max(0.0, value)
+
+
 def check_links(
     urls: list[str],
     use_proxy: Optional[bool] = None,
@@ -189,6 +200,7 @@ def check_links(
     resolved_timeout = TIMEOUT if timeout is None else timeout
     resolved_use_proxy = USE_PROXY if use_proxy is None else use_proxy
     resolved_proxy = PROXY_HOSTPORT if proxy_hostport is None else proxy_hostport
+    per_link_delay = _resolve_per_link_delay()
 
     if max_workers is None:
         env_workers = os.environ.get("CHECKLINK_WORKERS") or os.environ.get("CHECKLINK_MAX_WORKERS")
@@ -201,13 +213,17 @@ def check_links(
         cpu_count = os.cpu_count() or 4
         max_workers = min(32, max(4, cpu_count * 5))
     max_workers = max(1, min(max_workers, len(urls)))
+    if per_link_delay > 0:
+        max_workers = 1
 
     if max_workers == 1:
         session = make_session(use_proxy=resolved_use_proxy, proxy_hostport=resolved_proxy)
-        return [
-            check_link_with_details(url, session=session, timeout=resolved_timeout)
-            for url in urls
-        ]
+        results: list[Dict[str, Any]] = []
+        for idx, url in enumerate(urls):
+            results.append(check_link_with_details(url, session=session, timeout=resolved_timeout))
+            if per_link_delay > 0 and idx < len(urls) - 1:
+                sleep(per_link_delay)
+        return results
 
     def worker(idx: int, url: str) -> Tuple[int, Dict[str, Any]]:
         session = _thread_session(resolved_use_proxy, resolved_proxy)

@@ -1,4 +1,9 @@
 Flask==3.0.3
+<<<<<<< HEAD
 requests[socks]==2.32.3
 gunicorn==23.0.0
+=======
+gunicorn==23.0.0
+requests[socks]==2.32.3
+>>>>>>> 9b8768a81f59d9c2fbff2a02c21a573013248aa3
 urllib3==2.2.3

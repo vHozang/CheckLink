@@ -39,3 +39,4 @@ python web.py
 - Nếu có nhiều `BLOCKED/429`, hãy bật proxy và tăng `Timeout`.
 - Nút **Tải CSV/JSON** để xuất kết quả.
 - Giới hạn mặc định: 2000 link / lần.
+## Hello World

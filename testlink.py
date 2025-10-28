@@ -216,6 +216,7 @@ def check_links(
     use_proxy: Optional[bool] = None,
     proxy_hostport: Optional[str] = None,
     timeout: Optional[float] = None,
+    per_link_delay: Optional[float] = None,
     progress_callback: Optional[ProgressCallback] = None,
     max_workers: Optional[int] = None,
 ) -> list[Dict[str, Any]]:
@@ -225,7 +226,14 @@ def check_links(
     resolved_timeout = TIMEOUT if timeout is None else timeout
     resolved_use_proxy = USE_PROXY if use_proxy is None else use_proxy
     resolved_proxy = PROXY_HOSTPORT if proxy_hostport is None else proxy_hostport
-    per_link_delay = _resolve_per_link_delay()
+    if per_link_delay is None:
+        per_link_delay = _resolve_per_link_delay()
+    else:
+        try:
+            per_link_delay = float(per_link_delay)
+        except (TypeError, ValueError):
+            per_link_delay = _resolve_per_link_delay()
+    per_link_delay = max(0.0, per_link_delay)
 
     if max_workers is None:
         env_workers = os.environ.get("CHECKLINK_WORKERS") or os.environ.get("CHECKLINK_MAX_WORKERS")

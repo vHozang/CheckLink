@@ -120,6 +120,13 @@ def get_last_check_time():
     return parse_iso8601(row["updated_at"])
 
 
+def resolve_web_delay():
+    try:
+        return max(0.0, float(os.environ.get("CHECKLINK_WEB_DELAY", "0")))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ---------------------------- Flask App ----------------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
@@ -401,8 +408,13 @@ def check():
         flash(f"Danh sách quá dài, chỉ kiểm tra {MAX_LINKS} link đầu.")
 
     # Run check
-    results = check_links(items, use_proxy=False,
-                          proxy_hostport=None, timeout=timeout)
+    results = check_links(
+        items,
+        use_proxy=False,
+        proxy_hostport=None,
+        timeout=timeout,
+        per_link_delay=resolve_web_delay(),
+    )
 
     # Persist & detect changes
     conn = get_db()

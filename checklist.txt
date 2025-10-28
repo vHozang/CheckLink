@@ -1,0 +1,10 @@
+Tối ưu tốc độ thực thi của công cụ check link. [Done]
+
+Thiết lập lại chu kỳ chạy check link mặc định 10 s và cho phép cấu hình trong khoảng 1 s–20 s. [Done]
+
+Gỡ bỏ chức năng gửi kết quả về Telegram. [Done]
+
+Tích hợp và áp dụng font chữ Fira Code. [Done]
+
+Loại bỏ bước so sánh, chỉ hiển thị trạng thái hiện tại của từng link. [Done]
+

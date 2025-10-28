@@ -1,11 +1,10 @@
 
+import math
 import os
 import io
 import csv
-import uuid
 import sqlite3
-from datetime import datetime, timedelta
-from typing import List, Dict
+from datetime import datetime, timezone
 
 from flask import Flask, request, redirect, url_for, send_file, render_template_string, flash
 
@@ -44,6 +43,21 @@ def init_db():
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
 
+def parse_iso8601(value):
+    if not value:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="ignore")
+    value = value.strip()
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
 def _linewise(text):
     return [ln.strip() for ln in text.splitlines() if ln.strip()]
 
@@ -72,6 +86,23 @@ def clamp_timeout(v, default=20.0):
         t = float(os.environ.get("TIMEOUT", default))
     return max(1.0, min(t, 60.0))
 
+def clamp_interval(v, default=10.0):
+    try:
+        t = float(v) if v not in (None, "") else float(os.environ.get("CHECK_INTERVAL_DEFAULT", default))
+    except Exception:
+        t = float(os.environ.get("CHECK_INTERVAL_DEFAULT", default))
+    return max(1.0, min(t, 20.0))
+
+def get_last_check_time():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT updated_at FROM checks ORDER BY updated_at DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return parse_iso8601(row["updated_at"])
+
 # ---------------------------- Flask App ----------------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
@@ -85,6 +116,9 @@ TEMPLATE = r"""<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&display=swap" rel="stylesheet" />
   <title>{{ title }}</title>
   <style>
     :root{
@@ -114,17 +148,18 @@ TEMPLATE = r"""<!doctype html>
     .kpi .val{ font-size:26px; font-weight:900; margin-top:4px; }
     .kpi .pct{ font-size:12px; margin-top:2px; }
     .ok{ color:var(--ok) } .bad{ color:var(--bad) } .unpaid{ color:var(--unpaid) } .other{ color:var(--other) }
-    textarea{ width:100%; min-height:160px; border-radius:12px; border:1px solid var(--border); padding:12px; background:transparent; color:var(--text); }
+    textarea{ width:100%; min-height:160px; border-radius:12px; border:1px solid var(--border); padding:12px; background:transparent; color:var(--text); font-family:'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     input[type="number"]{ border:1px solid var(--border); background:transparent; color:var(--text); border-radius:12px; padding:10px 12px; width:120px; }
     table{ width:100%; border-collapse:collapse; }
     th,td{ border-bottom:1px solid var(--border); padding:8px 8px; text-align:left; font-size:14px; }
     th{ color:var(--muted) }
-    td.code{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space:nowrap; max-width:380px; overflow:hidden; text-overflow:ellipsis; }
+    td.code{ font-family:'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space:nowrap; max-width:380px; overflow:hidden; text-overflow:ellipsis; }
     .pill{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-weight:700; font-size:12px; }
     .pill.ok{ background:rgba(16,185,129,.15); color:var(--ok) }
     .pill.bad{ background:rgba(239,68,68,.15); color:var(--bad) }
     .pill.unpaid{ background:rgba(245,158,11,.15); color:var(--unpaid) }
-    .pill.other{ background:rgba(96,165,250,.15); color:var(--other) }
+        .pill.other{ background:rgba(96,165,250,.15); color:var(--other) }
+    .error-cell{ color:var(--muted); font-size:13px; max-width:260px; white-space:normal; word-break:break-word; }
     .flash{ background:rgba(239,68,68,.15); border:1px solid rgba(239,68,68,.35); color:var(--bad); padding:10px; border-radius:10px; margin:10px 0; }
     .toolbar{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
     select{ border:1px solid var(--border); background:transparent; color:var(--text); border-radius:12px; padding:10px 12px; }
@@ -171,7 +206,7 @@ https://custom-domain.com
 store1.com"></textarea>
           <div class="toolbar">
             <label>File .txt: <input type="file" name="txtfile" accept=".txt"></label>
-            <label>Timeout (1–60s): <input type="number" name="timeout" value="{{ default_timeout }}"></label>
+            <label>Chu kỳ chạy (1–20s): <input type="number" name="interval" min="1" max="20" step="1" value="{{ default_interval }}"></label>
             <button class="btn" type="submit">Chạy Kiểm Tra</button>
           </div>
         </form>
@@ -207,61 +242,32 @@ store1.com"></textarea>
     </div>
 
     <div class="card" style="margin-top:12px;">
-      <h3>So Sánh Kết Quả Kiểm Tra</h3>
-      <form method="GET" action="{{ url_for('index') }}" class="toolbar">
-        <label>So sánh thay đổi trong: 
-          <select name="window">
-            <option value="24h" {% if window=='24h' %}selected{% endif %}>24 Giờ Qua</option>
-            <option value="7d" {% if window=='7d' %}selected{% endif %}>7 Ngày</option>
-            <option value="30d" {% if window=='30d' %}selected{% endif %}>30 Ngày</option>
-          </select>
-        </label>
-        <button class="btn gray" type="submit">Áp dụng</button>
-        <form method="POST" action="{{ url_for('telegram_summary') }}" style="display:inline;">
-          <button class="btn" type="submit">Gửi Tóm Tắt Telegram</button>
-        </form>
-      </form>
-
-      <h4>Thay Đổi Trong {{ window_label }}</h4>
-      <div class="kpi" style="margin: 6px 0 12px 0;">
-        <div class="item">
-          <div class="label">Mới DEAD</div>
-          <div class="val bad">{{ changes.new_dead }}</div>
-        </div>
-        <div class="item">
-          <div class="label">Đã Phục Hồi</div>
-          <div class="val ok">{{ changes.recovered }}</div>
-        </div>
-        <div class="item">
-          <div class="label">Tổng Thay Đổi</div>
-          <div class="val other">{{ changes.total }}</div>
-        </div>
-      </div>
-
+      <h3>Trạng Thái Hiện Tại</h3>
+      <p class="muted">Hiển thị {{ statuses|length }} link gần nhất (giới hạn {{ status_limit }}).</p>
       <table>
         <thead>
           <tr>
             <th>URL Store</th>
-            <th>Thay Đổi</th>
-            <th>Thay Đổi Lúc</th>
+            <th>Final URL</th>
+            <th>HTTP</th>
+            <th>Phân Loại</th>
+            <th>Cập Nhật</th>
+            <th>Lỗi</th>
           </tr>
         </thead>
         <tbody>
-          {% for e in change_rows %}
+          {% for row in statuses %}
             <tr>
-              <td class="code"><a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.url }}</a></td>
-              <td>
-                {% set from_g = e.prev_group %}
-                {% set to_g = e.new_group %}
-                <span class="pill {{ from_g }}">{{ e.prev_classification or 'N/A' }}</span> →
-                <span class="pill {{ to_g }}">{{ e.new_classification }}</span>
-              </td>
-              <td>{{ e.changed_at }}</td>
+              <td class="code"><a href="{{ row.url }}" target="_blank" rel="noopener">{{ row.url }}</a></td>
+              <td class="code">{% if row.final_url %}<a href="{{ row.final_url }}" target="_blank" rel="noopener">{{ row.final_url }}</a>{% else %}-{% endif %}</td>
+              <td>{{ row.http_status or 'N/A' }}</td>
+              <td><span class="pill {{ row.group }}">{{ row.classification or 'UNKNOWN' }}</span></td>
+              <td>{{ row.updated_at or '-' }}</td>
+              <td class="error-cell">{{ row.error or '' }}</td>
             </tr>
+          {% else %}
+            <tr><td colspan="6" class="muted">Chưa có dữ liệu. Hãy chạy kiểm tra để bắt đầu.</td></tr>
           {% endfor %}
-          {% if change_rows|length == 0 %}
-            <tr><td colspan="3" class="muted">Không có thay đổi trong khoảng thời gian đã chọn.</td></tr>
-          {% endif %}
         </tbody>
       </table>
     </div>
@@ -269,6 +275,7 @@ store1.com"></textarea>
 </body>
 </html>
 """
+
 
 def compute_metrics():
     conn = get_db()
@@ -291,70 +298,62 @@ def compute_metrics():
         "unpaid_pct": pct(unpaid, max(total, 1)),
     }
 
-def window_to_delta(window: str):
-    if window == "7d": return timedelta(days=7), "7 Ngày Qua"
-    if window == "30d": return timedelta(days=30), "30 Ngày Qua"
-    return timedelta(hours=24), "24 Giờ Qua"
+
 
 @app.route("/", methods=["GET"])
 def index():
-    window = request.args.get("window", "24h")
-    td, label = window_to_delta(window)
-    since = (datetime.utcnow() - td).isoformat() + "Z"
+    status_limit = int(os.environ.get("STATUS_LIMIT", "500"))
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM events WHERE changed_at >= ? ORDER BY id DESC LIMIT 200", (since,))
+    cur.execute("""
+        SELECT url, final_url, http_status, classification, error, updated_at
+        FROM checks
+        ORDER BY datetime(updated_at) DESC
+        LIMIT ?
+    """, (status_limit,))
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
 
-    # Count categories
-    new_dead = 0
-    recovered = 0
-    for r in rows:
-        pg = group_of(r["prev_classification"])
-        ng = group_of(r["new_classification"])
-        if ng == "bad" and pg != "bad":
-            new_dead += 1
-        if pg == "bad" and ng == "ok":
-            recovered += 1
-    changes = {"new_dead": new_dead, "recovered": recovered, "total": len(rows)}
-    change_rows = [{
+    statuses = [{
         "url": r["url"],
-        "prev_classification": r["prev_classification"],
-        "new_classification": r["new_classification"],
-        "prev_group": group_of(r["prev_classification"]),
-        "new_group": group_of(r["new_classification"]),
-        "changed_at": r["changed_at"],
+        "final_url": r["final_url"],
+        "http_status": r["http_status"],
+        "classification": (r["classification"] or "").upper(),
+        "group": group_of(r["classification"]),
+        "error": r["error"],
+        "updated_at": r["updated_at"],
     } for r in rows]
 
-    # Last run time (approx using latest event or latest checks updated_at)
-    last_run = None
-    if rows:
-        last_run = rows[0]["changed_at"]
-    else:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT updated_at FROM checks ORDER BY updated_at DESC LIMIT 1")
-        rr = cur.fetchone()
-        conn.close()
-        if rr: last_run = rr["updated_at"]
-
     metrics = compute_metrics()
+    last_run = rows[0]["updated_at"] if rows else None
 
     theme = request.cookies.get("theme") or "dark"
-    default_timeout = int(float(os.environ.get("TIMEOUT", "20")))
+    interval_cookie = request.cookies.get("interval")
+    default_interval = int(clamp_interval(interval_cookie, default=10.0))
 
     return render_template_string(TEMPLATE, title=APP_TITLE, theme=theme, metrics=metrics,
-                                  window=window, window_label=label, changes=changes,
-                                  change_rows=change_rows, last_run=last_run,
-                                  default_timeout=default_timeout)
+                                  last_run=last_run, default_interval=default_interval,
+                                  statuses=statuses, status_limit=status_limit)
 
 @app.route("/check", methods=["POST"])
 def check():
     links_text = request.form.get("links_text", "").strip()
     file = request.files.get("txtfile")
-    timeout = clamp_timeout(request.form.get("timeout"), default=20.0)
+    timeout = clamp_timeout(None, default=20.0)
+    interval = clamp_interval(request.form.get("interval"), default=10.0)
+    interval_value = int(max(1, min(20, round(interval))))
+    cooldown_seconds = float(interval_value)
+    last_check_at = get_last_check_time()
+    now_dt = datetime.now(timezone.utc)
+    if last_check_at:
+        elapsed = (now_dt - last_check_at).total_seconds()
+        if elapsed < cooldown_seconds:
+            wait = math.ceil(cooldown_seconds - elapsed)
+            flash(f"Vui lòng đợi thêm {wait}s trước khi chạy lại.")
+            resp = redirect(url_for('index'))
+            resp.set_cookie("interval", str(interval_value), max_age=30 * 24 * 60 * 60)
+            return resp
 
     items = []
     if links_text:
@@ -433,27 +432,6 @@ def export_csv():
     bio = io.BytesIO(sio.getvalue().encode("utf-8-sig"))
     bio.seek(0)
     return send_file(bio, mimetype="text/csv", as_attachment=True, download_name="shopify-checks.csv")
-
-@app.route("/telegram-summary", methods=["POST"])
-def telegram_summary():
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        flash("Chưa cấu hình TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, không thể gửi.")
-        return redirect(url_for('index'))
-    # Build summary text
-    metrics = compute_metrics()
-    text = f"📊 {APP_TITLE}\\nTổng: {metrics['total']} | LIVE: {metrics['live']} | DEAD: {metrics['dead']} | UNPAID: {metrics['unpaid']}"
-    try:
-        import urllib.request, urllib.parse
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
-        req = urllib.request.Request(url, data=data)
-        urllib.request.urlopen(req, timeout=10).read()
-        flash("Đã gửi tóm tắt lên Telegram.")
-    except Exception as e:
-        flash(f"Gửi Telegram thất bại: {e}")
-    return redirect(url_for('index'))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT","8000")), debug=True)

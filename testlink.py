@@ -1,17 +1,20 @@
 import os
 import re
-import requests
-from typing import Any, Dict, Optional
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
+
+import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from requests.exceptions import (
-    Timeout,
-    ProxyError,
-    SSLError,
     ConnectionError,
+    ProxyError,
     RequestException,
+    SSLError,
+    Timeout,
 )
+from urllib3.util.retry import Retry
 
 # ================== CONFIGURATION ==================
 USE_PROXY = True  # Set to False when no proxy is required
@@ -66,6 +69,24 @@ def make_session(
             "https": proxy_url,
         })
     return s
+
+
+_thread_local = threading.local()
+
+
+def _thread_session(
+    use_proxy: bool,
+    proxy_hostport: Optional[str],
+) -> requests.Session:
+    """Reuse one requests.Session per worker thread to avoid reconnect overhead."""
+    key: Tuple[bool, Optional[str]] = (use_proxy, proxy_hostport)
+    sess = getattr(_thread_local, "session", None)
+    sess_key = getattr(_thread_local, "session_key", None)
+    if sess is None or sess_key != key:
+        sess = make_session(use_proxy=use_proxy, proxy_hostport=proxy_hostport)
+        _thread_local.session = sess
+        _thread_local.session_key = key
+    return sess
 
 
 def is_password_page(final_url: str, html: str) -> bool:
@@ -160,14 +181,49 @@ def check_links(
     use_proxy: Optional[bool] = None,
     proxy_hostport: Optional[str] = None,
     timeout: Optional[float] = None,
+    max_workers: Optional[int] = None,
 ) -> list[Dict[str, Any]]:
-    session = make_session(use_proxy=use_proxy, proxy_hostport=proxy_hostport)
-    results: list[Dict[str, Any]] = []
-    for url in urls:
-        results.append(
-            check_link_with_details(url, session=session, timeout=timeout)
-        )
-    return results
+    if not urls:
+        return []
+
+    resolved_timeout = TIMEOUT if timeout is None else timeout
+    resolved_use_proxy = USE_PROXY if use_proxy is None else use_proxy
+    resolved_proxy = PROXY_HOSTPORT if proxy_hostport is None else proxy_hostport
+
+    if max_workers is None:
+        env_workers = os.environ.get("CHECKLINK_WORKERS") or os.environ.get("CHECKLINK_MAX_WORKERS")
+        if env_workers:
+            try:
+                max_workers = int(env_workers)
+            except (TypeError, ValueError):
+                max_workers = None
+    if max_workers is None:
+        cpu_count = os.cpu_count() or 4
+        max_workers = min(32, max(4, cpu_count * 5))
+    max_workers = max(1, min(max_workers, len(urls)))
+
+    if max_workers == 1:
+        session = make_session(use_proxy=resolved_use_proxy, proxy_hostport=resolved_proxy)
+        return [
+            check_link_with_details(url, session=session, timeout=resolved_timeout)
+            for url in urls
+        ]
+
+    def worker(idx: int, url: str) -> Tuple[int, Dict[str, Any]]:
+        session = _thread_session(resolved_use_proxy, resolved_proxy)
+        return idx, check_link_with_details(url, session=session, timeout=resolved_timeout)
+
+    results: list[Optional[Dict[str, Any]]] = [None] * len(urls)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(worker, idx, url)
+            for idx, url in enumerate(urls)
+        ]
+        for future in as_completed(futures):
+            idx, data = future.result()
+            results[idx] = data
+
+    return [r for r in results if r is not None]
 
 
 def main():

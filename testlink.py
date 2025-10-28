@@ -1,9 +1,11 @@
+import math
 import os
 import re
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import sleep
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -16,6 +18,8 @@ from requests.exceptions import (
     Timeout,
 )
 from urllib3.util.retry import Retry
+
+ProgressCallback = Callable[[str, Dict[str, Any]], None]
 
 # ================== CONFIGURATION ==================
 USE_PROXY = True  # Set to False when no proxy is required
@@ -187,11 +191,32 @@ def _resolve_per_link_delay() -> float:
     return max(0.0, value)
 
 
+def _sleep_with_countdown(
+    delay: float,
+    progress_callback: Optional[ProgressCallback],
+    info: Dict[str, Any],
+) -> None:
+    if delay <= 0:
+        return
+    remaining_seconds = max(1, int(math.ceil(delay)))
+    if progress_callback:
+        for remaining in range(remaining_seconds, 0, -1):
+            progress_callback(
+                "countdown",
+                {**info, "remaining": remaining},
+            )
+            sleep(1)
+        progress_callback("countdown_done", info)
+    else:
+        sleep(delay)
+
+
 def check_links(
     urls: list[str],
     use_proxy: Optional[bool] = None,
     proxy_hostport: Optional[str] = None,
     timeout: Optional[float] = None,
+    progress_callback: Optional[ProgressCallback] = None,
     max_workers: Optional[int] = None,
 ) -> list[Dict[str, Any]]:
     if not urls:
@@ -218,11 +243,18 @@ def check_links(
 
     if max_workers == 1:
         session = make_session(use_proxy=resolved_use_proxy, proxy_hostport=resolved_proxy)
+        total = len(urls)
         results: list[Dict[str, Any]] = []
         for idx, url in enumerate(urls):
-            results.append(check_link_with_details(url, session=session, timeout=resolved_timeout))
-            if per_link_delay > 0 and idx < len(urls) - 1:
-                sleep(per_link_delay)
+            info = {"url": url, "index": idx, "total": total}
+            if progress_callback:
+                progress_callback("start", info)
+            result = check_link_with_details(url, session=session, timeout=resolved_timeout)
+            results.append(result)
+            if progress_callback:
+                progress_callback("result", {**info, "result": result})
+            if per_link_delay > 0 and idx < total - 1:
+                _sleep_with_countdown(per_link_delay, progress_callback, info)
         return results
 
     def worker(idx: int, url: str) -> Tuple[int, Dict[str, Any]]:
@@ -242,20 +274,49 @@ def check_links(
     return [r for r in results if r is not None]
 
 
+def _cli_progress(event: str, data: Dict[str, Any]) -> None:
+    """Default progress reporter for CLI usage."""
+    if event == "start":
+        idx = data["index"] + 1
+        total = data["total"]
+        url = data["url"]
+        print(f"[{idx}/{total}] Kiểm tra: {url}")
+    elif event == "result":
+        result = data.get("result", {})
+        status = result.get("classification")
+        http_status = result.get("http_status")
+        print(f"    ➜ Trạng thái: {status} (HTTP {http_status})")
+    elif event == "countdown":
+        remaining = data["remaining"]
+        url = data["url"]
+        sys.stdout.write(f"\r    Đợi {remaining:2d}s trước link tiếp theo ({url})")
+        sys.stdout.flush()
+    elif event == "countdown_done":
+        sys.stdout.write("\r" + " " * 120 + "\r")
+        sys.stdout.flush()
+
+
 def main():
     base_dir = os.path.dirname(__file__)
     input_file = os.path.join(base_dir, "links.txt")
     output_file = os.path.join(base_dir, "checked_results.txt")
 
-    session = make_session()
-
     # đọc link và chuẩn hóa
     with open(input_file, "r", encoding="utf-8") as f:
         links = [normalize_url(ln) for ln in f if ln.strip()]
 
+    results = check_links(
+        links,
+        use_proxy=None,
+        proxy_hostport=None,
+        timeout=TIMEOUT,
+        progress_callback=_cli_progress,
+    )
+
     with open(output_file, "w", encoding="utf-8") as out:
-        for link in links:
-            status = check_link_status(link, session=session)
+        for res in results:
+            link = res.get("normalized_url") or res.get("input_url")
+            status = res.get("classification")
             line = f"{link} => {status}"
             print(line)
             out.write(line + "\n")

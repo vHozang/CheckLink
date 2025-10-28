@@ -1,4 +1,3 @@
-
 import math
 import os
 import io
@@ -14,10 +13,12 @@ APP_TITLE = "CheckLink – Shopify Monitor"
 
 DB_PATH = os.environ.get("DB_PATH", "data.db")
 
+
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     conn = get_db()
@@ -40,8 +41,10 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
+
 
 def parse_iso8601(value):
     if not value:
@@ -58,40 +61,53 @@ def parse_iso8601(value):
     except ValueError:
         return None
 
+
 def _linewise(text):
     return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
 
 def _dedup_preserve(seq):
     seen, out = set(), []
     for x in seq:
         if x not in seen:
-            seen.add(x); out.append(x)
+            seen.add(x)
+            out.append(x)
     return out
+
 
 OK_SET = {"LIVE", "PASSWORD"}
 BAD_SET = {"DEAD", "BLOCKED", "BLOCKED(401)", "BLOCKED_OR_DNS"}
 UNPAID_SET = {"UNPAID", "UNPAID_PLAN"}
 
+
 def group_of(c):
     c = (c or "").upper()
-    if c in OK_SET: return "ok"
-    if c in BAD_SET: return "bad"
-    if c in UNPAID_SET: return "unpaid"
+    if c in OK_SET:
+        return "ok"
+    if c in BAD_SET:
+        return "bad"
+    if c in UNPAID_SET:
+        return "unpaid"
     return "other"
+
 
 def clamp_timeout(v, default=20.0):
     try:
-        t = float(v) if v not in (None, "") else float(os.environ.get("TIMEOUT", default))
+        t = float(v) if v not in (None, "") else float(
+            os.environ.get("TIMEOUT", default))
     except Exception:
         t = float(os.environ.get("TIMEOUT", default))
     return max(1.0, min(t, 60.0))
 
+
 def clamp_interval(v, default=10.0):
     try:
-        t = float(v) if v not in (None, "") else float(os.environ.get("CHECK_INTERVAL_DEFAULT", default))
+        t = float(v) if v not in (None, "") else float(
+            os.environ.get("CHECK_INTERVAL_DEFAULT", default))
     except Exception:
         t = float(os.environ.get("CHECK_INTERVAL_DEFAULT", default))
     return max(1.0, min(t, 20.0))
+
 
 def get_last_check_time():
     conn = get_db()
@@ -102,6 +118,7 @@ def get_last_check_time():
     if not row:
         return None
     return parse_iso8601(row["updated_at"])
+
 
 # ---------------------------- Flask App ----------------------------
 app = Flask(__name__)
@@ -282,11 +299,14 @@ def compute_metrics():
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) AS c FROM checks")
     total = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) AS c FROM checks WHERE upper(classification) IN (%s)" % ",".join(["?"]*len(OK_SET)), tuple(OK_SET))
+    cur.execute("SELECT COUNT(*) AS c FROM checks WHERE upper(classification) IN (%s)" %
+                ",".join(["?"]*len(OK_SET)), tuple(OK_SET))
     live = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) AS c FROM checks WHERE upper(classification) IN (%s)" % ",".join(["?"]*len(BAD_SET)), tuple(BAD_SET))
+    cur.execute("SELECT COUNT(*) AS c FROM checks WHERE upper(classification) IN (%s)" %
+                ",".join(["?"]*len(BAD_SET)), tuple(BAD_SET))
     dead = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) AS c FROM checks WHERE upper(classification) IN (%s)" % ",".join(["?"]*len(UNPAID_SET)), tuple(UNPAID_SET))
+    cur.execute("SELECT COUNT(*) AS c FROM checks WHERE upper(classification) IN (%s)" %
+                ",".join(["?"]*len(UNPAID_SET)), tuple(UNPAID_SET))
     unpaid = cur.fetchone()["c"]
     conn.close()
     def pct(n, d): return round((n*100.0/d), 1) if d else 0.0
@@ -297,7 +317,6 @@ def compute_metrics():
         "dead_pct": pct(dead, max(total, 1)),
         "unpaid_pct": pct(unpaid, max(total, 1)),
     }
-
 
 
 @app.route("/", methods=["GET"])
@@ -336,6 +355,7 @@ def index():
                                   last_run=last_run, default_interval=default_interval,
                                   statuses=statuses, status_limit=status_limit)
 
+
 @app.route("/check", methods=["POST"])
 def check():
     links_text = request.form.get("links_text", "").strip()
@@ -352,7 +372,8 @@ def check():
             wait = math.ceil(cooldown_seconds - elapsed)
             flash(f"Vui lòng đợi thêm {wait}s trước khi chạy lại.")
             resp = redirect(url_for('index'))
-            resp.set_cookie("interval", str(interval_value), max_age=30 * 24 * 60 * 60)
+            resp.set_cookie("interval", str(interval_value),
+                            max_age=30 * 24 * 60 * 60)
             return resp
 
     items = []
@@ -380,7 +401,8 @@ def check():
         flash(f"Danh sách quá dài, chỉ kiểm tra {MAX_LINKS} link đầu.")
 
     # Run check
-    results = check_links(items, use_proxy=False, proxy_hostport=None, timeout=timeout)
+    results = check_links(items, use_proxy=False,
+                          proxy_hostport=None, timeout=timeout)
 
     # Persist & detect changes
     conn = get_db()
@@ -415,23 +437,29 @@ def check():
     flash(f"Đã kiểm tra {len(results)} link. Timeout={int(timeout)}s.")
     return redirect(url_for('index'))
 
+
 @app.route("/export.csv", methods=["POST"])
 def export_csv():
     # Export all rows of 'checks'
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT url, final_url, http_status, classification, error, updated_at FROM checks ORDER BY url")
+    cur.execute(
+        "SELECT url, final_url, http_status, classification, error, updated_at FROM checks ORDER BY url")
     rows = cur.fetchall()
     conn.close()
 
     sio = io.StringIO()
     writer = csv.writer(sio)
-    writer.writerow(["url", "final_url", "http_status", "classification", "error", "updated_at"])
+    writer.writerow(["url", "final_url", "http_status",
+                    "classification", "error", "updated_at"])
     for r in rows:
-        writer.writerow([r["url"], r["final_url"], r["http_status"], r["classification"], (r["error"] or "").replace('\\n',' '), r["updated_at"]])
+        writer.writerow([r["url"], r["final_url"], r["http_status"], r["classification"],
+                        (r["error"] or "").replace('\\n', ' '), r["updated_at"]])
     bio = io.BytesIO(sio.getvalue().encode("utf-8-sig"))
     bio.seek(0)
     return send_file(bio, mimetype="text/csv", as_attachment=True, download_name="shopify-checks.csv")
 
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT","8000")), debug=True)
+    app.run(host="0.0.0.0", port=int(
+        os.environ.get("PORT", "8000")), debug=True)

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: shopify-checker
+    env: python
+    plan: free
+    autoDeploy: true
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn web:app"
+    envVars:
+      - key: USE_PROXY
+        value: "false"
+      - key: PROXY_HOSTPORT
+        value: "127.0.0.1:60000"
+      - key: TIMEOUT
+        value: "20"
